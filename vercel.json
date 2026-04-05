@@ -1,0 +1,16 @@
+{
+  "functions": {
+    "api/webhook.ts": {
+      "maxDuration": 60
+    },
+    "api/cron/poll.ts": {
+      "maxDuration": 60
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/cron/poll",
+      "schedule": "*/5 * * * *"
+    }
+  ]
+}
