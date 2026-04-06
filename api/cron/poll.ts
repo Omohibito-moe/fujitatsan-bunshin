@@ -12,7 +12,7 @@ import { getThreadId, setThreadId, pruneExpired } from "../../lib/thread-store";
 import { formatAiReply, ERROR_MESSAGE } from "../../lib/formatter";
 
 export const config = {
-  maxDuration: 60,
+  maxDuration: 300,
 };
 
 export default async function handler(

@@ -3,7 +3,7 @@
   "outputDirectory": "public",
   "functions": {
     "api/cron/poll.ts": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
   "crons": [
