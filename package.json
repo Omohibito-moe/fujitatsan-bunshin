@@ -1,18 +1,20 @@
 {
   "name": "chatwork-ai-bot",
   "version": "1.0.0",
-  "description": "Chatwork AI Knowledge Bot powered by Dify",
+  "description": "Chatwork AI Knowledge Bot powered by OpenAI Assistants API",
   "scripts": {
     "dev": "vercel dev",
     "build": "tsc --noEmit",
-    "lint": "eslint . --ext .ts"
+    "setup": "npx ts-node --esm scripts/setup-assistant.ts"
   },
   "dependencies": {
-    "node-fetch": "^3.3.2"
+    "openai": "^4.52.0",
+    "@vercel/kv": "^2.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.4.0",
-    "vercel": "^39.0.0"
+    "vercel": "^39.0.0",
+    "ts-node": "^10.9.2"
   }
 }

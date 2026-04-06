@@ -1,32 +1,25 @@
 /**
- * Chatwork ポーリング用 Cron エンドポイント（フォールバック方式）
+ * Chatwork ポーリング + OpenAI Assistants API 回答 + Chatwork返信
  *
- * Webhook が利用できない場合（スタンダードプラン以下）に使用する。
- * vercel.json の crons 設定により 5分ごとに実行される。
- *
- * 注意: サーバーレス関数はステートレスなため、lastMessageId はインメモリでは
- *       リセットされる。本番ではVercel KVへの移行を推奨。
+ * Vercel Cron Jobs（Proプラン）または外部cron（cron-job.org等）から
+ * 3分間隔で呼び出される。
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { getMessages, postMessageWithRetry } from "../../lib/chatwork";
-import { askDify } from "../../lib/dify";
-import { getConversationId, setConversationId, pruneExpired } from "../../lib/conversation";
+import { askAssistant } from "../../lib/assistant";
+import { getThreadId, setThreadId, pruneExpired } from "../../lib/thread-store";
 import { formatAiReply, ERROR_MESSAGE } from "../../lib/formatter";
 
 export const config = {
   maxDuration: 60,
 };
 
-// インメモリで最終処理済みメッセージIDを保持
-// （サーバーレス関数の再起動で失われるが、Vercel KV移行前の暫定対応）
-let lastProcessedMessageId: string | null = null;
-
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  // Vercel Cronからのリクエストのみ許可
+  // 外部cronからのリクエスト認証（CRON_SECRETが設定されている場合）
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const authHeader = req.headers.authorization;
@@ -37,7 +30,8 @@ export default async function handler(
   }
 
   try {
-    const messages = await getMessages(0); // 未読メッセージのみ取得
+    // 未読メッセージを取得
+    const messages = await getMessages(0);
 
     if (messages.length === 0) {
       res.status(200).json({ status: "no new messages" });
@@ -46,14 +40,10 @@ export default async function handler(
 
     const botAccountId = Number(process.env.CHATWORK_BOT_ACCOUNT_ID);
 
-    // 処理対象メッセージをフィルタリング
+    // Bot自身・空メッセージを除外
     const targets = messages.filter((msg) => {
-      // Bot自身のメッセージは除外
       if (botAccountId && msg.account.account_id === botAccountId) return false;
-      // 空メッセージは除外
       if (!msg.body?.trim()) return false;
-      // 既処理IDより古いメッセージは除外
-      if (lastProcessedMessageId && msg.message_id <= lastProcessedMessageId) return false;
       return true;
     });
 
@@ -62,26 +52,23 @@ export default async function handler(
       return;
     }
 
-    // 期限切れ会話を掃除
     pruneExpired();
 
-    // 各メッセージを順番に処理（レートリミット対策で直列処理）
+    // 直列処理（レートリミット対策）
     for (const msg of targets) {
-      const cleanedQuery = stripChatworkMarkup(msg.body.trim());
+      const query = stripChatworkMarkup(msg.body.trim());
       const accountId = msg.account.account_id;
-      const conversationId = getConversationId(accountId);
+      const threadId = getThreadId(accountId);
 
       try {
-        const difyRes = await askDify(
-          cleanedQuery,
-          String(accountId),
-          conversationId
+        const { answer, threadId: newThreadId } = await askAssistant(
+          threadId,
+          query
         );
 
-        setConversationId(accountId, difyRes.conversation_id);
+        setThreadId(accountId, newThreadId);
 
-        const replyText = formatAiReply(difyRes.answer);
-        await postMessageWithRetry(replyText);
+        await postMessageWithRetry(formatAiReply(answer));
       } catch (err) {
         console.error(`[poll] Error processing message ${msg.message_id}:`, err);
         try {
@@ -91,17 +78,11 @@ export default async function handler(
         }
       }
 
-      // 処理済みIDを更新
-      lastProcessedMessageId = msg.message_id;
-
-      // レートリミット対策: メッセージ間に200ms待機
+      // メッセージ間に200ms待機（レートリミット対策）
       await sleep(200);
     }
 
-    res.status(200).json({
-      status: "ok",
-      processed: targets.length,
-    });
+    res.status(200).json({ status: "ok", processed: targets.length });
   } catch (err) {
     console.error("[poll] Unexpected error:", err);
     res.status(500).json({ error: "Internal Server Error" });
