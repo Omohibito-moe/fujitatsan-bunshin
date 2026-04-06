@@ -16,8 +16,9 @@ export const config = {
 };
 
 // 最後に処理したメッセージIDをインメモリで保持
-// （Vercel Proプランではインスタンスが維持されやすいが、再起動時はリセットされる）
+// initialized=falseの初回はメッセージを処理せず最新IDだけ記録してスキップする
 let lastProcessedMessageId: string | null = null;
+let initialized = false;
 
 export default async function handler(
   req: VercelRequest,
@@ -39,6 +40,16 @@ export default async function handler(
 
     if (messages.length === 0) {
       res.status(200).json({ status: "no new messages" });
+      return;
+    }
+
+    // 初回起動時は最新IDを記録するだけでスキップ（過去メッセージの誤処理を防ぐ）
+    if (!initialized) {
+      const latestId = messages[messages.length - 1]?.message_id ?? null;
+      lastProcessedMessageId = latestId;
+      initialized = true;
+      console.log(`[poll] Initialized. lastProcessedMessageId=${lastProcessedMessageId}`);
+      res.status(200).json({ status: "initialized", lastProcessedMessageId });
       return;
     }
 
