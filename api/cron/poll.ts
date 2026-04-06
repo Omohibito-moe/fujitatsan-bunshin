@@ -1,11 +1,12 @@
 /**
  * Chatwork ポーリング + OpenAI Assistants API 回答 + Chatwork返信
  *
- * Vercel Cron Jobs（Proプラン）または外部cron（cron-job.org等）から
- * 3分間隔で呼び出される。
+ * Vercel Cron Jobs（Proプラン）から3分間隔で呼び出される。
+ * lastProcessedMessageId は Vercel KV に永続化する。
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
+import { kv } from "@vercel/kv";
 import { getMessages, postMessageWithRetry } from "../../lib/chatwork";
 import { askAssistant } from "../../lib/assistant";
 import { getThreadId, setThreadId, pruneExpired } from "../../lib/thread-store";
@@ -15,10 +16,7 @@ export const config = {
   maxDuration: 60,
 };
 
-// 最後に処理したメッセージIDをインメモリで保持
-// initialized=falseの初回はメッセージを処理せず最新IDだけ記録してスキップする
-let lastProcessedMessageId: string | null = null;
-let initialized = false;
+const KV_KEY = "last_processed_message_id";
 
 export default async function handler(
   req: VercelRequest,
@@ -35,6 +33,9 @@ export default async function handler(
   }
 
   try {
+    // KVから最後に処理したメッセージIDを取得
+    const lastProcessedMessageId = await kv.get<string>(KV_KEY);
+
     // force=1で全件取得（既読・未読問わず最新100件）
     const messages = await getMessages(1);
 
@@ -43,13 +44,12 @@ export default async function handler(
       return;
     }
 
-    // 初回起動時は最新IDを記録するだけでスキップ（過去メッセージの誤処理を防ぐ）
-    if (!initialized) {
+    // 初回起動時（KVにIDがない）は最新IDを記録するだけでスキップ
+    if (!lastProcessedMessageId) {
       const latestId = messages[messages.length - 1]?.message_id ?? null;
-      lastProcessedMessageId = latestId;
-      initialized = true;
-      console.log(`[poll] Initialized. lastProcessedMessageId=${lastProcessedMessageId}`);
-      res.status(200).json({ status: "initialized", lastProcessedMessageId });
+      if (latestId) await kv.set(KV_KEY, latestId);
+      console.log(`[poll] Initialized. lastProcessedMessageId=${latestId}`);
+      res.status(200).json({ status: "initialized", lastProcessedMessageId: latestId });
       return;
     }
 
@@ -59,7 +59,7 @@ export default async function handler(
     const targets = messages.filter((msg) => {
       if (botAccountId && msg.account.account_id === botAccountId) return false;
       if (!msg.body?.trim()) return false;
-      if (lastProcessedMessageId && msg.message_id <= lastProcessedMessageId) return false;
+      if (msg.message_id <= lastProcessedMessageId) return false;
       return true;
     });
 
@@ -69,6 +69,8 @@ export default async function handler(
     }
 
     pruneExpired();
+
+    let newLastId = lastProcessedMessageId;
 
     // 直列処理（レートリミット対策）
     for (const msg of targets) {
@@ -83,7 +85,6 @@ export default async function handler(
         );
 
         setThreadId(accountId, newThreadId);
-
         await postMessageWithRetry(formatAiReply(answer));
       } catch (err) {
         console.error(`[poll] Error processing message ${msg.message_id}:`, err);
@@ -94,12 +95,12 @@ export default async function handler(
         }
       }
 
-      // 処理済みIDを更新
-      lastProcessedMessageId = msg.message_id;
-
-      // メッセージ間に200ms待機（レートリミット対策）
+      newLastId = msg.message_id;
       await sleep(200);
     }
+
+    // 処理済みIDをKVに保存
+    await kv.set(KV_KEY, newLastId);
 
     res.status(200).json({ status: "ok", processed: targets.length });
   } catch (err) {
