@@ -66,10 +66,35 @@ export async function askAssistant(
     throw new Error("No text response from assistant");
   }
 
-  // 引用注釈（【4:0†source】等）を除去
-  const answer = firstContent.text.value
-    .replace(/【\d+:\d+†[^】]*】/g, "")
-    .trim();
+  // アノテーション（引用）を処理してファイル名に置換
+  const textContent = firstContent.text;
+  const annotations = textContent.annotations ?? [];
 
-  return { answer, threadId: thread.id };
+  let answer = textContent.value;
+  const citations: string[] = [];
+
+  for (const annotation of annotations) {
+    if (annotation.type === "file_citation") {
+      const fileId = annotation.file_citation.file_id;
+      let fileName = fileId;
+      try {
+        const fileInfo = await getClient().files.retrieve(fileId);
+        fileName = fileInfo.filename.replace(/\.[^/.]+$/, ""); // 拡張子を除去
+      } catch {
+        // ファイル名取得失敗時はIDをそのまま使用
+      }
+      const citationIndex = citations.indexOf(fileName);
+      const index = citationIndex === -1
+        ? citations.push(fileName)
+        : citationIndex + 1;
+      answer = answer.replace(annotation.text, `[${index}]`);
+    }
+  }
+
+  // 出典リストを末尾に追加
+  if (citations.length > 0) {
+    answer += "\n\n【出典】\n" + citations.map((c, i) => `[${i + 1}] ${c}`).join("\n");
+  }
+
+  return { answer: answer.trim(), threadId: thread.id };
 }
