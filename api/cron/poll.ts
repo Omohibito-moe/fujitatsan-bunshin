@@ -2,11 +2,11 @@
  * Chatwork ポーリング + OpenAI Assistants API 回答 + Chatwork返信
  *
  * Vercel Cron Jobs（Proプラン）から3分間隔で呼び出される。
- * lastProcessedMessageId は Vercel KV に永続化する。
+ * lastProcessedMessageId は Redis（REDIS_URL）に永続化する。
  */
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { kv } from "@vercel/kv";
+import Redis from "ioredis";
 import { getMessages, postMessageWithRetry } from "../../lib/chatwork";
 import { askAssistant } from "../../lib/assistant";
 import { getThreadId, setThreadId, pruneExpired } from "../../lib/thread-store";
@@ -18,11 +18,16 @@ export const config = {
 
 const KV_KEY = "last_processed_message_id";
 
+function getRedis(): Redis {
+  const url = process.env.REDIS_URL;
+  if (!url) throw new Error("REDIS_URL is not set");
+  return new Redis(url, { lazyConnect: true, connectTimeout: 5000 });
+}
+
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
 ): Promise<void> {
-  // 外部cronからのリクエスト認証（CRON_SECRETが設定されている場合）
   const cronSecret = process.env.CRON_SECRET;
   if (cronSecret) {
     const authHeader = req.headers.authorization;
@@ -32,9 +37,10 @@ export default async function handler(
     }
   }
 
+  const redis = getRedis();
+
   try {
-    // KVから最後に処理したメッセージIDを取得
-    const lastProcessedMessageId = await kv.get<string>(KV_KEY);
+    const lastProcessedMessageId = await redis.get(KV_KEY);
 
     // force=1で全件取得（既読・未読問わず最新100件）
     const messages = await getMessages(1);
@@ -44,10 +50,10 @@ export default async function handler(
       return;
     }
 
-    // 初回起動時（KVにIDがない）は最新IDを記録するだけでスキップ
+    // 初回起動時（Redisにまだ記録がない）は最新IDを保存してスキップ
     if (!lastProcessedMessageId) {
       const latestId = messages[messages.length - 1]?.message_id ?? null;
-      if (latestId) await kv.set(KV_KEY, latestId);
+      if (latestId) await redis.set(KV_KEY, latestId);
       console.log(`[poll] Initialized. lastProcessedMessageId=${latestId}`);
       res.status(200).json({ status: "initialized", lastProcessedMessageId: latestId });
       return;
@@ -55,7 +61,6 @@ export default async function handler(
 
     const botAccountId = Number(process.env.CHATWORK_BOT_ACCOUNT_ID);
 
-    // Bot自身・空メッセージ・処理済みメッセージを除外
     const targets = messages.filter((msg) => {
       if (botAccountId && msg.account.account_id === botAccountId) return false;
       if (!msg.body?.trim()) return false;
@@ -72,18 +77,13 @@ export default async function handler(
 
     let newLastId = lastProcessedMessageId;
 
-    // 直列処理（レートリミット対策）
     for (const msg of targets) {
       const query = stripChatworkMarkup(msg.body.trim());
       const accountId = msg.account.account_id;
       const threadId = getThreadId(accountId);
 
       try {
-        const { answer, threadId: newThreadId } = await askAssistant(
-          threadId,
-          query
-        );
-
+        const { answer, threadId: newThreadId } = await askAssistant(threadId, query);
         setThreadId(accountId, newThreadId);
         await postMessageWithRetry(formatAiReply(answer));
       } catch (err) {
@@ -99,13 +99,13 @@ export default async function handler(
       await sleep(200);
     }
 
-    // 処理済みIDをKVに保存
-    await kv.set(KV_KEY, newLastId);
-
+    await redis.set(KV_KEY, newLastId);
     res.status(200).json({ status: "ok", processed: targets.length });
   } catch (err) {
     console.error("[poll] Unexpected error:", err);
     res.status(500).json({ error: "Internal Server Error" });
+  } finally {
+    redis.disconnect();
   }
 }
 

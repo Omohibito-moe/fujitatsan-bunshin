@@ -8,13 +8,15 @@
     "setup": "npx ts-node --esm scripts/setup-assistant.ts"
   },
   "dependencies": {
-    "openai": "^4.52.0",
-    "@vercel/kv": "^2.0.0"
+    "@types/dotenv": "^8.2.3",
+    "dotenv": "^17.4.1",
+    "ioredis": "^5.3.2",
+    "openai": "^4.52.0"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
     "typescript": "^5.4.0",
-    "vercel": "^39.0.0",
-    "ts-node": "^10.9.2"
+    "vercel": "^39.0.0"
   }
 }
