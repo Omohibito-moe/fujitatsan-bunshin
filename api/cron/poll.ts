@@ -15,6 +15,10 @@ export const config = {
   maxDuration: 60,
 };
 
+// 最後に処理したメッセージIDをインメモリで保持
+// （Vercel Proプランではインスタンスが維持されやすいが、再起動時はリセットされる）
+let lastProcessedMessageId: string | null = null;
+
 export default async function handler(
   req: VercelRequest,
   res: VercelResponse
@@ -30,8 +34,8 @@ export default async function handler(
   }
 
   try {
-    // 未読メッセージを取得
-    const messages = await getMessages(0);
+    // force=1で全件取得（既読・未読問わず最新100件）
+    const messages = await getMessages(1);
 
     if (messages.length === 0) {
       res.status(200).json({ status: "no new messages" });
@@ -40,10 +44,11 @@ export default async function handler(
 
     const botAccountId = Number(process.env.CHATWORK_BOT_ACCOUNT_ID);
 
-    // Bot自身・空メッセージを除外
+    // Bot自身・空メッセージ・処理済みメッセージを除外
     const targets = messages.filter((msg) => {
       if (botAccountId && msg.account.account_id === botAccountId) return false;
       if (!msg.body?.trim()) return false;
+      if (lastProcessedMessageId && msg.message_id <= lastProcessedMessageId) return false;
       return true;
     });
 
@@ -77,6 +82,9 @@ export default async function handler(
           console.error("[poll] Failed to post error message:", postErr);
         }
       }
+
+      // 処理済みIDを更新
+      lastProcessedMessageId = msg.message_id;
 
       // メッセージ間に200ms待機（レートリミット対策）
       await sleep(200);
